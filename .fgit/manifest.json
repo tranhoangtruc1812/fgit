@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "default_branch": "dev",
+  "layout": "sibling",
+  "repos": [
+    {
+      "name": "stay-nest",
+      "url": "git@gitlab.atomsolution.vn:pms/stay-nest.git"
+    },
+    {
+      "name": "stay-nest-admin",
+      "url": "git@gitlab.atomsolution.vn:pms/stay-nest-admin.git"
+    },
+    {
+      "name": "stay-nest-booking",
+      "url": "git@gitlab.atomsolution.vn:pms/stay-nest-booking.git"
+    },
+    {
+      "name": "stay-nest-landing",
+      "url": "git@gitlab.atomsolution.vn:pms/stay-nest-landing.git"
+    },
+    {
+      "name": "stay-nest-shared",
+      "url": "git@gitlab.atomsolution.vn:pms/stay-nest-shared.git"
+    },
+    {
+      "name": "stay-nest-superadmin",
+      "url": "git@gitlab.atomsolution.vn:pms/stay-nest-superadmin.git"
+    },
+    {
+      "name": "staynest-meta",
+      "url": "https://gitlab.atomsolution.vn/pms/staynest-meta.git"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# Service repos are cloned as siblings, not tracked inside root.
+.env
+*.log
+.pytest_cache/
+__pycache__/
+*.egg-info/
+
+# Ignore sibling service repos if anyone accidentally clones them inside root.
