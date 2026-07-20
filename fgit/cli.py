@@ -68,6 +68,20 @@ def cmd_clone(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    """Clone child repositories from an existing root's manifest."""
+    root_dir = find_root(args.root)
+    manifest = Manifest.load()
+    repos = _repos_from_manifest(manifest, root_dir)
+    missing = [repo for repo in repos if not repo.exists()]
+    if not missing:
+        log("All repositories are already cloned.", level="success")
+        return 0
+    log(f"Cloning {len(missing)} child repositories...")
+    _run_parallel(missing, lambda repo: repo.clone(), jobs=args.jobs)
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Create an fgit manifest from sibling repositories around the root."""
     root_dir = find_root(args.root)
@@ -441,6 +455,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_clone.add_argument("url", help="Git URL of the root repository.")
     p_clone.add_argument("dest", nargs="?", help="Destination directory for root.")
     p_clone.set_defaults(func=cmd_clone)
+
+    # bootstrap
+    p_bootstrap = sub.add_parser(
+        "bootstrap", help="Clone child repositories from an existing root's manifest."
+    )
+    p_bootstrap.set_defaults(func=cmd_bootstrap)
 
     # init
     p_init = sub.add_parser("init", help="Create a manifest from sibling repositories.")
