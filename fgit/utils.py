@@ -133,3 +133,20 @@ def _find_root_by_walk(start_dir: Optional[str] = None) -> str:
 def sibling_dir(root_dir: str, name: str) -> str:
     """Return the absolute path of a sibling repo next to root."""
     return os.path.abspath(os.path.join(root_dir, "..", name))
+
+
+def print_clone_tree(root_dir: str, repo_names: List[str]) -> None:
+    """Print a visual tree of the cloned root and its sibling repos."""
+    root_name = os.path.basename(root_dir) or root_dir
+    print(f"{root_name}/")
+    print("├── .fgit/")
+    print("│   └── manifest.json")
+    if not repo_names:
+        print("└── (no child repositories)")
+        return
+    count = len(repo_names)
+    for i, name in enumerate(repo_names):
+        connector = "└──" if i == count - 1 else "├──"
+        print(f"{connector} ../{name}/")
+    parent = os.path.dirname(root_dir)
+    print(f"\nLayout: child repositories are siblings of {root_name} under {parent}")

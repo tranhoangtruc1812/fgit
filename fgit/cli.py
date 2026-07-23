@@ -1,6 +1,7 @@
 """Command-line interface for fgit."""
 import argparse
 import getpass
+import json
 import os
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from fgit import __version__, credentials as creds
 from fgit.config import Config, load_config
 from fgit.manifest import Manifest, RepoEntry, default_manifest
 from fgit.repo import Repo
-from fgit.utils import Colors, find_root, log, run_command
+from fgit.utils import Colors, find_root, log, print_clone_tree, run_command
 
 
 DEFAULT_JOBS = 4
@@ -29,7 +30,13 @@ def _repos_from_manifest(manifest: Manifest, root_dir: str) -> List[Repo]:
     ]
 
 
-def _run_parallel(repos: List[Repo], fn: Callable[[Repo], None], jobs: int = DEFAULT_JOBS, silent: bool = False) -> None:
+def _run_parallel(
+    repos: List[Repo],
+    fn: Callable[[Repo], None],
+    jobs: int = DEFAULT_JOBS,
+    silent: bool = False,
+    description: str = "operation",
+) -> None:
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         future_to_repo = {executor.submit(fn, repo): repo for repo in repos}
         for future in as_completed(future_to_repo):
@@ -37,9 +44,9 @@ def _run_parallel(repos: List[Repo], fn: Callable[[Repo], None], jobs: int = DEF
             try:
                 future.result()
                 if not silent:
-                    log(f"{repo.name}: done", level="success")
+                    log(f"{repo.name}: {description} completed", level="success")
             except Exception as exc:  # noqa: BLE001
-                log(f"{repo.name}: {exc}", level="error")
+                log(f"{repo.name}: {description} failed: {exc}", level="error")
 
 
 def cmd_clone(args: argparse.Namespace) -> int:
@@ -64,7 +71,9 @@ def cmd_clone(args: argparse.Namespace) -> int:
     manifest = Manifest.load(manifest_path)
     repos = _repos_from_manifest(manifest, root_dir)
     log(f"Cloning {len(repos)} child repositories...")
-    _run_parallel(repos, lambda repo: repo.clone() if not repo.exists() else None)
+    _run_parallel(repos, lambda repo: repo.clone() if not repo.exists() else None, description="clone")
+    repo_names = [repo.name for repo in repos]
+    print_clone_tree(root_dir, repo_names)
     return 0
 
 
@@ -78,15 +87,27 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         log("All repositories are already cloned.", level="success")
         return 0
     log(f"Cloning {len(missing)} child repositories...")
-    _run_parallel(missing, lambda repo: repo.clone(), jobs=args.jobs)
+    _run_parallel(missing, lambda repo: repo.clone(), jobs=args.jobs, description="clone")
     return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:
     """Create an fgit manifest from sibling repositories around the root."""
     root_dir = find_root(args.root)
+    manifest_path = os.path.join(root_dir, ".fgit", "manifest.json")
     manifest = default_manifest()
 
+    existing_names: List[str] = []
+    if os.path.isfile(manifest_path):
+        try:
+            existing = Manifest.load(manifest_path)
+            existing_names = [r.name for r in existing.repos]
+            manifest = existing
+            log(f"Loaded existing manifest with {len(existing.repos)} repos.")
+        except (json.JSONDecodeError, OSError, KeyError) as exc:
+            log(f"Could not load existing manifest: {exc}. Creating a new one.", level="warning")
+
+    discovered: List[RepoEntry] = []
     if args.from_siblings:
         parent_dir = os.path.dirname(root_dir)
         for entry in os.listdir(parent_dir):
@@ -110,11 +131,34 @@ def cmd_init(args: argparse.Namespace) -> int:
                     ).strip()
                 except subprocess.CalledProcessError:
                     pass
-                manifest.repos.append(RepoEntry(name=entry, url=url, branch=branch))
+                discovered.append(RepoEntry(name=entry, url=url, branch=branch))
+
+    existing_set = set(existing_names)
+    missing = [r for r in discovered if r.name not in existing_set]
+    stale = [name for name in existing_names if name not in {r.name for r in discovered}]
+
+    if missing:
+        if args.add_missing:
+            manifest.repos.extend(missing)
+            log(f"Added {len(missing)} new sibling repos to manifest:")
+            for repo in missing:
+                log(f"  + {repo.name}: {repo.url}")
+        else:
+            log(f"Found {len(missing)} sibling repos not in manifest. Use --add-missing to include them:", level="warning")
+            for repo in missing:
+                log(f"  ? {repo.name}: {repo.url}")
+
+    if stale:
+        log(f"Warning: {len(stale)} repos in manifest are missing on disk:", level="warning")
+        for name in stale:
+            log(f"  - {name}")
+
+    if not existing_names and not missing:
+        log("No sibling repositories found. You can add repos manually to .fgit/manifest.json")
 
     manifest.repos.sort(key=lambda r: r.name)
     manifest.save()
-    log(f"Created manifest at {os.path.join(root_dir, '.fgit', 'manifest.json')}", level="success")
+    log(f"Manifest saved to {manifest_path}", level="success")
     for repo in manifest.repos:
         log(f"  - {repo.name}: {repo.url}")
     return 0
@@ -134,8 +178,12 @@ def cmd_pull(args: argparse.Namespace) -> int:
     root_dir = find_root(args.root)
     manifest = Manifest.load()
     repos = _repos_from_manifest(manifest, root_dir)
-    log("Pulling all repositories...")
-    _run_parallel(repos, lambda repo: repo.pull(), jobs=args.jobs)
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        log("Dry-run: showing pull operations that would run on all repositories...")
+    else:
+        log("Pulling all repositories...")
+    _run_parallel(repos, lambda repo: repo.pull(dry_run=dry_run), jobs=args.jobs, description="pull")
     return 0
 
 
@@ -143,8 +191,12 @@ def cmd_push(args: argparse.Namespace) -> int:
     root_dir = find_root(args.root)
     manifest = Manifest.load()
     repos = _repos_from_manifest(manifest, root_dir)
-    log("Pushing all repositories...")
-    _run_parallel(repos, lambda repo: repo.push(), jobs=args.jobs)
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        log("Dry-run: showing push operations that would run on all repositories...")
+    else:
+        log("Pushing all repositories...")
+    _run_parallel(repos, lambda repo: repo.push(dry_run=dry_run), jobs=args.jobs, description="push")
     return 0
 
 
@@ -152,8 +204,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
     root_dir = find_root(args.root)
     manifest = Manifest.load()
     repos = _repos_from_manifest(manifest, root_dir)
-    log("Syncing all repositories (pull then push)...")
-    _run_parallel(repos, lambda repo: repo.sync(), jobs=args.jobs)
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        log("Dry-run: showing sync operations that would run on all repositories...")
+    else:
+        log("Syncing all repositories (pull then push)...")
+    _run_parallel(repos, lambda repo: repo.sync(dry_run=dry_run), jobs=args.jobs, description="sync")
     return 0
 
 
@@ -162,12 +218,16 @@ def cmd_checkout(args: argparse.Namespace) -> int:
     branch = args.branch
     manifest = Manifest.load()
     repos = _repos_from_manifest(manifest, root_dir)
-    log(f"Checking out branch {branch} on root and all child repos...")
-    try:
-        run_command(["git", "checkout", branch], cwd=root_dir)
-    except subprocess.CalledProcessError:
-        log(f"Could not checkout {branch} on root repo", level="warning")
-    _run_parallel(repos, lambda repo: repo.checkout(branch), jobs=args.jobs)
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        log(f"Dry-run: would checkout branch {branch} on root and all child repos...")
+    else:
+        log(f"Checking out branch {branch} on root and all child repos...")
+        try:
+            run_command(["git", "checkout", branch], cwd=root_dir)
+        except subprocess.CalledProcessError:
+            log(f"Could not checkout {branch} on root repo", level="warning")
+    _run_parallel(repos, lambda repo: repo.checkout(branch, dry_run=dry_run), jobs=args.jobs, description="checkout")
     return 0
 
 
@@ -176,6 +236,7 @@ def cmd_branch(args: argparse.Namespace) -> int:
     manifest = Manifest.load()
     repos = _repos_from_manifest(manifest, root_dir)
     action = args.action
+    dry_run = getattr(args, "dry_run", False)
 
     if action == "list":
         for repo in repos:
@@ -187,16 +248,22 @@ def cmd_branch(args: argparse.Namespace) -> int:
         if not args.name:
             log("Branch name is required for create", level="error")
             return 1
-        log(f"Creating branch {args.name} on all repositories...")
-        _run_parallel(repos, lambda repo: repo.create_branch(args.name), jobs=args.jobs)
+        if dry_run:
+            log(f"Dry-run: would create branch {args.name} on all repositories...")
+        else:
+            log(f"Creating branch {args.name} on all repositories...")
+        _run_parallel(repos, lambda repo: repo.create_branch(args.name, dry_run=dry_run), jobs=args.jobs, description="create branch")
         return 0
 
     if action == "delete":
         if not args.name:
             log("Branch name is required for delete", level="error")
             return 1
-        log(f"Deleting branch {args.name} on all repositories...")
-        _run_parallel(repos, lambda repo: repo.delete_branch(args.name), jobs=args.jobs)
+        if dry_run:
+            log(f"Dry-run: would delete branch {args.name} on all repositories...")
+        else:
+            log(f"Deleting branch {args.name} on all repositories...")
+        _run_parallel(repos, lambda repo: repo.delete_branch(args.name, dry_run=dry_run), jobs=args.jobs, description="delete branch")
         return 0
 
     log(f"Unknown branch action: {action}", level="error")
@@ -246,7 +313,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
         if result.returncode != 0:
             raise RuntimeError(f"exit code {result.returncode}")
 
-    _run_parallel(repos, run_in_repo, jobs=args.jobs, silent=True)
+    _run_parallel(repos, run_in_repo, jobs=args.jobs, silent=True, description=f"exec '{command_str}'")
     return 0
 
 
@@ -256,8 +323,12 @@ def cmd_sync_from(args: argparse.Namespace) -> int:
     manifest = Manifest.load()
     repos = _repos_from_manifest(manifest, root_dir)
     branch = args.branch
-    log(f"Syncing from {branch} into current branches of all child repositories...")
-    _run_parallel(repos, lambda repo: repo.sync_from(branch), jobs=args.jobs)
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        log(f"Dry-run: showing sync-from {branch} operations that would run...")
+    else:
+        log(f"Syncing from {branch} into current branches of all child repositories...")
+    _run_parallel(repos, lambda repo: repo.sync_from(branch, dry_run=dry_run), jobs=args.jobs, description="sync-from")
     return 0
 
 
@@ -389,7 +460,7 @@ def cmd_remote(args: argparse.Namespace) -> int:
 
     if action == "use-https":
         log("Switching all child repositories to HTTPS remote URLs...")
-        _run_parallel(repos, lambda repo: repo.use_https_remote(), jobs=args.jobs)
+        _run_parallel(repos, lambda repo: repo.use_https_remote(), jobs=args.jobs, description="use-https")
         return 0
 
     if action == "show":
@@ -433,6 +504,64 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+EXPLANATIONS = {
+    "clone": "Clone the root repository, read .fgit/manifest.json, then clone every child repository listed in the manifest as a sibling directory of root.",
+    "bootstrap": "If root already exists, clone any child repositories from the manifest that are missing on disk.",
+    "init": "Scan sibling directories around root that contain a .git directory and build (or update) .fgit/manifest.json. Use --add-missing to auto-include newly discovered repos.",
+    "status": "Show the current branch, dirty state, and ahead/behind counts for every child repository in the manifest.",
+    "pull": "Run `git pull --ff-only origin <current-branch>` in every child repository.",
+    "push": "Run `git push origin <current-branch>` in every child repository.",
+    "sync": "Run pull followed by push in every child repository.",
+    "checkout": "Checkout the given branch on root and every child repository. If the branch does not exist locally, create a tracking branch from origin/<branch>.",
+    "branch": "Manage branches across all child repositories: list, create (from origin/<default-branch>), or delete.",
+    "exec": "Run an arbitrary shell command in every child repository and prefix the output with the repository name.",
+    "sync-from": "For every child repository: (1) remember current branch, (2) fetch origin, (3) checkout the target branch and pull it, (4) checkout the original branch, (5) merge the target branch. If a merge conflict occurs, the merge is aborted.",
+    "clean": "Remove untracked files from every child repository. Runs as dry-run by default; use --force to actually delete.",
+    "doctor": "Check every child repository for common issues: missing clone, not a git repo, remote URL mismatch, unexpected branch, dirty working tree.",
+    "remote": "Show or switch origin remote URLs of child repositories. `use-https` converts SSH URLs to HTTPS.",
+    "project": "Register and switch between multiple fgit projects. After `fgit project use <name>`, every fgit command uses that project's root by default.",
+    "credential": "Store GitLab HTTPS credentials in ~/.config/fgit/netrc. Optionally encrypt with GPG.",
+    "config": "Get or set the legacy default_root path.",
+}
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    """Explain what a fgit command does without running it."""
+    command = args.command
+    explanation = EXPLANATIONS.get(command)
+    if explanation:
+        print(f"{command}: {explanation}")
+        return 0
+    log(f"No explanation available for '{command}'.", level="warning")
+    print("Available commands: " + ", ".join(sorted(EXPLANATIONS)))
+    return 1
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Check the health of all child repositories in the manifest."""
+    root_dir = find_root(args.root)
+    manifest = Manifest.load()
+    repos = _repos_from_manifest(manifest, root_dir)
+
+    log(f"Checking {len(repos)} repositories...")
+    any_issue = False
+    for repo in repos:
+        health = repo.check_health()
+        if health["ok"]:
+            log(f"{repo.name}: healthy", level="success")
+        else:
+            any_issue = True
+            log(f"{repo.name}: {len(health['issues'])} issue(s)", level="error")
+            for issue in health["issues"]:
+                log(f"    - {issue}")
+
+    if any_issue:
+        log("Some repositories have issues. Fix them and re-run `fgit doctor`.", level="warning")
+        return 1
+    log("All repositories are healthy.", level="success")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fgit",
@@ -470,6 +599,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument(
         "--default-branch", default="dev", help="Default branch for new manifest entries."
     )
+    p_init.add_argument(
+        "--add-missing", action="store_true", help="Auto-add discovered sibling repos that are not in the manifest."
+    )
     p_init.set_defaults(func=cmd_init)
 
     # status
@@ -478,25 +610,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     # pull
     p_pull = sub.add_parser("pull", help="Pull current branch in all repositories.")
+    p_pull.add_argument("--dry-run", action="store_true", help="Show what would be pulled without changing anything.")
     p_pull.set_defaults(func=cmd_pull)
 
     # push
     p_push = sub.add_parser("push", help="Push current branch in all repositories.")
+    p_push.add_argument("--dry-run", action="store_true", help="Show what would be pushed without changing anything.")
     p_push.set_defaults(func=cmd_push)
 
     # sync
     p_sync = sub.add_parser("sync", help="Pull then push current branch in all repositories.")
+    p_sync.add_argument("--dry-run", action="store_true", help="Show what would be synced without changing anything.")
     p_sync.set_defaults(func=cmd_sync)
 
     # checkout
     p_checkout = sub.add_parser("checkout", help="Checkout a branch in root and all child repos.")
     p_checkout.add_argument("branch", help="Branch name to checkout.")
+    p_checkout.add_argument("--dry-run", action="store_true", help="Show what would be checked out without changing anything.")
     p_checkout.set_defaults(func=cmd_checkout)
 
     # branch
     p_branch = sub.add_parser("branch", help="Manage branches across repositories.")
     p_branch.add_argument("action", choices=["list", "create", "delete"], help="Branch action.")
     p_branch.add_argument("name", nargs="?", help="Branch name (for create/delete).")
+    p_branch.add_argument("--dry-run", action="store_true", help="Show what would be done without changing anything.")
     p_branch.set_defaults(func=cmd_branch)
 
     # exec
@@ -514,7 +651,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pull a branch from origin and merge it into the current branch of all child repositories.",
     )
     p_sync_from.add_argument("branch", help="Branch name to sync from.")
+    p_sync_from.add_argument("--dry-run", action="store_true", help="Show the sync-from plan without changing anything.")
     p_sync_from.set_defaults(func=cmd_sync_from)
+
+    # doctor
+    p_doctor = sub.add_parser("doctor", help="Check the health of all child repositories.")
+    p_doctor.set_defaults(func=cmd_doctor)
+
+    # explain
+    p_explain = sub.add_parser("explain", help="Explain what a fgit command does.")
+    p_explain.add_argument("command", help="Command to explain (e.g. sync-from).")
+    p_explain.set_defaults(func=cmd_explain)
 
     # config
     p_config = sub.add_parser("config", help="Manage global fgit configuration.")

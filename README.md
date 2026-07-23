@@ -52,22 +52,30 @@ cd root
 fgit init
 ```
 
-`fgit init` sẽ quét các thư mục sibling có `.git` và tạo `.fgit/manifest.json`.
+`fgit init` sẽ quét các thư mục sibling có `.git` và tạo `.fgit/manifest.json`. Nếu manifest đã tồn tại, `fgit init` sẽ so sánh với các sibling repo thực tế:
+
+- Repo mới chưa có trong manifest sẽ được cảnh báo, dùng `--add-missing` để tự động thêm:
+  ```bash
+  fgit init --add-missing
+  ```
+- Repo đã xóa khỏi disk nhưng còn trong manifest sẽ được cảnh báo.
 
 ## Các lệnh
 
 ```bash
-fgit clone <root-url> [dest]     # clone root + tất cả repo con
+fgit clone <root-url> [dest]     # clone root + tất cả repo con (hiển thị cây thư mục sau khi xong)
 fgit status                       # trạng thái tất cả repo
-fgit pull                         # pull tất cả repo
-fgit push                         # push tất cả repo
-fgit sync                         # pull rồi push tất cả repo
-fgit checkout <branch>            # checkout branch trên root + repo con
+fgit pull [--dry-run]            # pull tất cả repo
+fgit push [--dry-run]            # push tất cả repo
+fgit sync [--dry-run]            # pull rồi push tất cả repo
+fgit checkout <branch> [--dry-run] # checkout branch trên root + repo con
 fgit branch list                  # liệt kê branch hiện tại
-fgit branch create <name>         # tạo branch trên tất cả repo
-fgit branch delete <name>         # xóa branch trên tất cả repo
+fgit branch create <name> [--dry-run]  # tạo branch trên tất cả repo
+fgit branch delete <name> [--dry-run]  # xóa branch trên tất cả repo
 fgit exec <command>               # chạy lệnh trong tất cả repo con
-fgit sync-from <branch>        # checkout branch, pull latest, quay lại current branch, merge branch vào
+fgit sync-from <branch> [--dry-run] # checkout branch, pull latest, quay lại current branch, merge branch vào
+fgit doctor                       # kiểm tra sức khỏe các repo (clone, remote, branch, dirty)
+fgit explain <command>            # giải thích một lệnh (ví dụ: fgit explain sync-from)
 fgit credential set                # lưu username/password GitLab cho HTTPS
 fgit credential show               # hiển thị credentials đã lưu
 fgit credential encrypt            # mã hóa file credentials bằng GPG
@@ -132,7 +140,7 @@ fgit sync-from dev
 
 Các lệnh này sẽ tự động dùng credentials từ `~/.config/fgit/netrc`.
 
-## Ví dụ `fgit sync-from`
+## Quản lý nhiều project
 
 `fgit` hỗ trợ đăng ký nhiều project và chuyển đổi giữa chúng:
 
@@ -200,6 +208,40 @@ Ví dụ `fgit exec`:
 ```bash
 fgit exec npm install
 fgit exec -- git log --oneline -5
+```
+
+## Kiểm tra sức khỏe repo
+
+`fgit doctor` giúp phát hiện các vấn đề phổ biến trong toàn bộ repo con:
+
+- Repo chưa được clone hoặc không phải git repo
+- Remote URL không khớp với manifest
+- Đang ở nhánh khác với `default_branch` (mặc định: `dev`)
+- Working tree đang dirty
+
+```bash
+fgit doctor
+```
+
+## Giải thích lệnh
+
+Nếu bạn không chắc một lệnh làm gì, dùng `fgit explain`:
+
+```bash
+fgit explain sync-from
+fgit explain doctor
+```
+
+## Dry-run cho lệnh nguy hiểm
+
+Các lệnh có thể thay đổi trạng thái đều hỗ trợ `--dry-run` để xem trước những gì sẽ xảy ra:
+
+```bash
+fgit sync-from dev --dry-run
+fgit pull --dry-run
+fgit push --dry-run
+fgit checkout feature-x --dry-run
+fgit branch create feature-x --dry-run
 ```
 
 ## Cấu hình

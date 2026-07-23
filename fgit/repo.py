@@ -2,7 +2,7 @@
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fgit import credentials as creds
 from fgit.utils import Colors, run_command, run_command_capture
@@ -91,24 +91,66 @@ class Repo:
         url = _to_https_url(self.url)
         self._git_run(["git", "clone", url, self.path])
 
-    def pull(self) -> None:
+    def remote_url(self) -> str:
+        """Return the origin remote URL."""
+        self._ensure_repo()
+        return self._git_capture(
+            ["git", "remote", "get-url", "origin"], cwd=self.path, use_credentials=False
+        )
+
+    def pull(self, dry_run: bool = False) -> None:
         self._ensure_repo()
         branch = self.current_branch()
+        if dry_run:
+            return
         self._git_run(["git", "pull", "--ff-only", "origin", branch], cwd=self.path)
 
-    def push(self) -> None:
+    def push(self, dry_run: bool = False) -> None:
         self._ensure_repo()
         branch = self.current_branch()
+        if dry_run:
+            return
         self._git_run(["git", "push", "origin", branch], cwd=self.path)
 
-    def sync(self) -> None:
+    def sync(self, dry_run: bool = False) -> None:
         self._ensure_repo()
-        self.pull()
-        self.push()
+        self.pull(dry_run=dry_run)
+        self.push(dry_run=dry_run)
 
     def current_branch(self) -> str:
         self._ensure_repo()
         return self._git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.path, use_credentials=False)
+
+    def check_health(self) -> Dict[str, Any]:
+        """Return a health report for this repo.
+
+        Result shape: {"name": str, "ok": bool, "issues": [str]}
+        """
+        issues: List[str] = []
+        if not self.exists():
+            issues.append("not cloned")
+        elif not self.is_git_repo():
+            issues.append("not a git repo")
+        else:
+            try:
+                actual_url = self.remote_url()
+                expected_https = _to_https_url(self.url)
+                if actual_url != self.url and actual_url != expected_https:
+                    issues.append(f"remote url mismatch: {actual_url}")
+            except (subprocess.CalledProcessError, RuntimeError) as exc:
+                issues.append(f"cannot read remote: {exc}")
+
+            try:
+                branch = self.current_branch()
+                if branch != self.default_branch:
+                    issues.append(f"on branch '{branch}', expected '{self.default_branch}'")
+            except (subprocess.CalledProcessError, RuntimeError) as exc:
+                issues.append(f"cannot read branch: {exc}")
+
+            if self._is_dirty():
+                issues.append("dirty working tree")
+
+        return {"name": self.name, "ok": not issues, "issues": issues}
 
     def status(self) -> RepoStatus:
         if not self.exists():
@@ -140,7 +182,7 @@ class Repo:
                 error=str(exc),
             )
 
-    def create_branch(self, name: str) -> None:
+    def create_branch(self, name: str, dry_run: bool = False) -> None:
         self._ensure_repo()
         # Check if branch already exists locally.
         try:
@@ -148,15 +190,21 @@ class Repo:
             return
         except subprocess.CalledProcessError:
             pass
+        if dry_run:
+            return
         # Create from default_branch.
         self._git_run(["git", "checkout", "-b", name, "origin/" + self.default_branch], cwd=self.path)
 
-    def delete_branch(self, name: str) -> None:
+    def delete_branch(self, name: str, dry_run: bool = False) -> None:
         self._ensure_repo()
+        if dry_run:
+            return
         self._git_run(["git", "branch", "-D", name], cwd=self.path)
 
-    def checkout(self, branch: str) -> None:
+    def checkout(self, branch: str, dry_run: bool = False) -> None:
         self._ensure_repo()
+        if dry_run:
+            return
         try:
             self._git_run(["git", "checkout", branch], cwd=self.path)
         except subprocess.CalledProcessError:
@@ -167,7 +215,7 @@ class Repo:
         self._ensure_repo()
         return self._git_capture(["git", "branch", "-vv"], cwd=self.path, use_credentials=False)
 
-    def sync_from(self, branch: str) -> None:
+    def sync_from(self, branch: str, dry_run: bool = False) -> None:
         """Merge the latest state of ``branch`` into the current branch.
 
         Steps:
@@ -181,6 +229,9 @@ class Repo:
         """
         self._ensure_repo()
         current_branch = self.current_branch()
+
+        if dry_run:
+            return
 
         # 1. Fetch latest refs from origin.
         self._git_run(["git", "fetch", "origin"], cwd=self.path)
