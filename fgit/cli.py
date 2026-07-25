@@ -8,7 +8,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List
 
-from fgit import __version__, credentials as creds
+from fgit import __version__, credentials as creds, ssh
 from fgit.config import Config, load_config
 from fgit.manifest import Manifest, RepoEntry, default_manifest
 from fgit.repo import Repo
@@ -71,7 +71,7 @@ def cmd_clone(args: argparse.Namespace) -> int:
     manifest = Manifest.load(manifest_path)
     repos = _repos_from_manifest(manifest, root_dir)
     log(f"Cloning {len(repos)} child repositories...")
-    _run_parallel(repos, lambda repo: repo.clone() if not repo.exists() else None, description="clone")
+    _run_parallel(repos, lambda repo: repo.clone() if not repo.exists() else None, jobs=args.jobs, description="clone")
     repo_names = [repo.name for repo in repos]
     print_clone_tree(root_dir, repo_names)
     return 0
@@ -504,6 +504,43 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ssh_key(args: argparse.Namespace) -> int:
+    """Generate an SSH key pair for Git host authentication, or show an existing one."""
+    action = args.action
+
+    if action == "generate":
+        try:
+            priv_path = ssh.generate_key(args.host, key_type=args.type, force=args.force)
+        except FileExistsError as exc:
+            log(str(exc), level="error")
+            return 1
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            log(f"Failed to generate SSH key: {exc}", level="error")
+            return 1
+
+        log(f"Generated SSH key at {priv_path}", level="success")
+
+        if ssh.add_ssh_config_entry(args.host, priv_path):
+            log(f"Added Host entry for {args.host} to ~/.ssh/config", level="success")
+        else:
+            log(f"~/.ssh/config already has a Host entry for {args.host}; left untouched", level="warning")
+
+        log("Add this public key to your Git host (e.g. GitLab > Settings > SSH Keys):")
+        print(ssh.read_public_key(priv_path))
+        return 0
+
+    if action == "show":
+        priv_path = ssh.key_path(args.host, args.type)
+        if not os.path.isfile(priv_path + ".pub"):
+            log(f"No key found at {priv_path}. Generate one with: fgit ssh-key generate", level="error")
+            return 1
+        print(ssh.read_public_key(priv_path))
+        return 0
+
+    log(f"Unknown ssh-key action: {action}", level="error")
+    return 1
+
+
 EXPLANATIONS = {
     "clone": "Clone the root repository, read .fgit/manifest.json, then clone every child repository listed in the manifest as a sibling directory of root.",
     "bootstrap": "If root already exists, clone any child repositories from the manifest that are missing on disk.",
@@ -521,6 +558,7 @@ EXPLANATIONS = {
     "remote": "Show or switch origin remote URLs of child repositories. `use-https` converts SSH URLs to HTTPS.",
     "project": "Register and switch between multiple fgit projects. After `fgit project use <name>`, every fgit command uses that project's root by default.",
     "credential": "Store GitLab HTTPS credentials in ~/.config/fgit/netrc. Optionally encrypt with GPG.",
+    "ssh-key": "Generate an SSH key pair for a Git host, register it in ~/.ssh/config, and print the public key to add on the host (e.g. GitLab > Settings > SSH Keys).",
     "config": "Get or set the legacy default_root path.",
 }
 
@@ -693,6 +731,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_credential.add_argument("--username", help="Git username.")
     p_credential.add_argument("--password", help="Git password or token.")
     p_credential.set_defaults(func=cmd_credential)
+
+    # ssh-key
+    p_ssh_key = sub.add_parser("ssh-key", help="Generate an SSH key pair for Git host authentication.")
+    p_ssh_key.add_argument(
+        "action", choices=["generate", "show"], default="generate", nargs="?", help="ssh-key action."
+    )
+    p_ssh_key.add_argument("--host", default="gitlab.atomsolution.vn", help="Git host to configure the key for.")
+    p_ssh_key.add_argument("--type", default="ed25519", choices=["ed25519", "rsa"], help="SSH key type.")
+    p_ssh_key.add_argument("--force", action="store_true", help="Overwrite an existing key.")
+    p_ssh_key.set_defaults(func=cmd_ssh_key)
 
     # remote
     p_remote = sub.add_parser("remote", help="Manage remote URLs of child repositories.")

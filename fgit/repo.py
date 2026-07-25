@@ -186,30 +186,38 @@ class Repo:
         self._ensure_repo()
         # Check if branch already exists locally.
         try:
-            self._git_run(["git", "rev-parse", "--verify", name], cwd=self.path, capture=True)
+            self._git_run(["git", "rev-parse", "--verify", name], cwd=self.path, capture=True, use_credentials=False)
             return
         except subprocess.CalledProcessError:
             pass
         if dry_run:
             return
         # Create from default_branch.
-        self._git_run(["git", "checkout", "-b", name, "origin/" + self.default_branch], cwd=self.path)
+        self._git_run(
+            ["git", "checkout", "-b", name, "origin/" + self.default_branch],
+            cwd=self.path,
+            use_credentials=False,
+        )
 
     def delete_branch(self, name: str, dry_run: bool = False) -> None:
         self._ensure_repo()
         if dry_run:
             return
-        self._git_run(["git", "branch", "-D", name], cwd=self.path)
+        self._git_run(["git", "branch", "-D", name], cwd=self.path, use_credentials=False)
 
     def checkout(self, branch: str, dry_run: bool = False) -> None:
         self._ensure_repo()
         if dry_run:
             return
         try:
-            self._git_run(["git", "checkout", branch], cwd=self.path)
+            self._git_run(["git", "checkout", branch], cwd=self.path, use_credentials=False)
         except subprocess.CalledProcessError:
             # Try to create tracking branch from origin.
-            self._git_run(["git", "checkout", "-b", branch, f"origin/{branch}"], cwd=self.path)
+            self._git_run(
+                ["git", "checkout", "-b", branch, f"origin/{branch}"],
+                cwd=self.path,
+                use_credentials=False,
+            )
 
     def list_branches(self) -> str:
         self._ensure_repo()
@@ -238,22 +246,24 @@ class Repo:
 
         # 2. Checkout the target branch (create a tracking branch if needed).
         try:
-            self._git_run(["git", "checkout", branch], cwd=self.path)
+            self._git_run(["git", "checkout", branch], cwd=self.path, use_credentials=False)
         except subprocess.CalledProcessError:
-            self._git_run(["git", "checkout", "-b", branch, f"origin/{branch}"], cwd=self.path)
+            self._git_run(
+                ["git", "checkout", "-b", branch, f"origin/{branch}"], cwd=self.path, use_credentials=False
+            )
 
         # 3. Pull latest code for the target branch.
         self._git_run(["git", "pull", "origin", branch], cwd=self.path)
 
         # 4. Checkout back to the original branch.
-        self._git_run(["git", "checkout", current_branch], cwd=self.path)
+        self._git_run(["git", "checkout", current_branch], cwd=self.path, use_credentials=False)
 
         # 5. Merge the target branch into the current branch.
         try:
-            self._git_run(["git", "merge", branch], cwd=self.path)
+            self._git_run(["git", "merge", branch], cwd=self.path, use_credentials=False)
         except subprocess.CalledProcessError:
             # Abort the merge to leave the working tree clean.
-            self._git_run(["git", "merge", "--abort"], cwd=self.path)
+            self._git_run(["git", "merge", "--abort"], cwd=self.path, use_credentials=False)
             raise RuntimeError(
                 f"merge conflict when merging {branch} into {current_branch}"
             )
