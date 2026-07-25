@@ -79,6 +79,8 @@ fgit explain <command>            # giải thích một lệnh (ví dụ: fgit e
 fgit credential set                # lưu username/password GitLab cho HTTPS
 fgit credential show               # hiển thị credentials đã lưu
 fgit credential encrypt            # mã hóa file credentials bằng GPG
+fgit ssh-key generate               # tạo SSH key mới và đăng ký vào ~/.ssh/config
+fgit ssh-key show                   # hiển thị public key đã tạo
 fgit remote use-https              # chuyển tất cả remote URL sang HTTPS
 fgit clean                         # xem file untracked sẽ bị xóa (dry-run)
 fgit clean --force                 # xóa thật file untracked
@@ -139,6 +141,25 @@ fgit sync-from dev
 ```
 
 Các lệnh này sẽ tự động dùng credentials từ `~/.config/fgit/netrc`.
+
+## Tạo SSH key
+
+Nếu bạn muốn dùng SSH thay vì HTTPS để xác thực với Git host:
+
+```bash
+fgit ssh-key generate --host gitlab.atomsolution.vn
+```
+
+Lệnh này sẽ:
+1. Tạo cặp key `ed25519` tại `~/.ssh/id_ed25519_fgit_<host>` (dùng `--type rsa` nếu cần RSA).
+2. Thêm một `Host` entry vào `~/.ssh/config` trỏ tới key vừa tạo (không ghi đè nếu đã tồn tại).
+3. In ra public key để bạn copy và thêm vào Git host (ví dụ: GitLab > Settings > SSH Keys).
+
+Dùng `--force` để tạo lại key nếu đã tồn tại. Xem lại public key bất kỳ lúc nào bằng:
+
+```bash
+fgit ssh-key show --host gitlab.atomsolution.vn
+```
 
 ## Quản lý nhiều project
 
