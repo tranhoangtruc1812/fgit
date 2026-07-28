@@ -182,19 +182,91 @@ class Repo:
                 error=str(exc),
             )
 
+    def has_local_branch(self, branch: str) -> bool:
+        """True if ``branch`` exists as a local branch."""
+        return self._ref_exists(f"refs/heads/{branch}")
+
+    def has_remote_branch(self, branch: str) -> bool:
+        """True if ``origin/branch`` exists as a remote-tracking ref."""
+        return self._ref_exists(f"refs/remotes/origin/{branch}")
+
+    def fetch_branch(self, branch: str) -> bool:
+        """Fetch a single branch from origin into its remote-tracking ref.
+
+        Returns True if the branch was fetched, False if origin has no such
+        branch. Raises RuntimeError for any other failure (auth, network, ...)
+        so a connectivity problem is never reported as a missing branch.
+        """
+        self._ensure_full_refspec()
+
+        # Use stored credentials when there are any, but never prompt: checkout
+        # must stay non-interactive, and SSH remotes need no credentials at all.
+        stored = creds.find_credentials()
+        if stored:
+            env, askpass = creds.git_env_with_credentials(*stored)
+        else:
+            env, askpass = os.environ.copy(), None
+        try:
+            result = run_command(
+                ["git", "fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                cwd=self.path,
+                check=False,
+                capture=True,
+                env=env,
+            )
+        finally:
+            creds.clear_askpass(askpass)
+
+        if result.returncode == 0:
+            return True
+        stderr = (result.stderr or "").strip()
+        if "couldn't find remote ref" in stderr:
+            return False
+        raise RuntimeError(stderr or f"git fetch origin {branch} failed")
+
+    def _ensure_full_refspec(self) -> None:
+        """Make sure origin's fetch refspec covers every branch.
+
+        Clones made with ``--single-branch`` map only one branch into
+        refs/remotes/origin/, so Git refuses to set up tracking for any other
+        branch. fgit switches branches across repos, so widen the refspec to
+        the standard wildcard the way a plain ``git clone`` would.
+        """
+        wildcard = "refs/heads/*:refs/remotes/origin/*"
+        try:
+            refspecs = self._git_capture(
+                ["git", "config", "--get-all", "remote.origin.fetch"],
+                cwd=self.path,
+                use_credentials=False,
+            ).splitlines()
+        except (RuntimeError, subprocess.CalledProcessError):
+            return
+
+        if any(spec.strip().lstrip("+") == wildcard for spec in refspecs):
+            return
+        self._git_capture(
+            ["git", "config", "--add", "remote.origin.fetch", f"+{wildcard}"],
+            cwd=self.path,
+            use_credentials=False,
+        )
+
     def create_branch(self, name: str, dry_run: bool = False) -> None:
         self._ensure_repo()
-        # Check if branch already exists locally.
-        try:
-            self._git_run(["git", "rev-parse", "--verify", name], cwd=self.path, capture=True, use_credentials=False)
+        # Nothing to do if the branch already exists locally.
+        if self.has_local_branch(name):
             return
-        except subprocess.CalledProcessError:
-            pass
         if dry_run:
             return
-        # Create from default_branch.
-        self._git_run(
-            ["git", "checkout", "-b", name, "origin/" + self.default_branch],
+        # Create from default_branch, fetching it first if it is not known yet.
+        base = self.default_branch
+        if not self.has_remote_branch(base):
+            self.fetch_branch(base)
+        if not self.has_remote_branch(base):
+            raise RuntimeError(
+                f"cannot create '{name}': base branch 'origin/{base}' does not exist on origin"
+            )
+        self._git_capture(
+            ["git", "checkout", "-b", name, f"origin/{base}"],
             cwd=self.path,
             use_credentials=False,
         )
@@ -206,18 +278,47 @@ class Repo:
         self._git_run(["git", "branch", "-D", name], cwd=self.path, use_credentials=False)
 
     def checkout(self, branch: str, dry_run: bool = False) -> None:
+        """Check out ``branch``, creating a tracking branch from origin if needed."""
         self._ensure_repo()
         if dry_run:
             return
+
+        # The branch is already here: just switch to it.
+        if self.has_local_branch(branch):
+            self._git_capture(["git", "checkout", branch], cwd=self.path, use_credentials=False)
+            return
+
+        # It may exist on origin but never have been fetched by this clone.
+        if not self.has_remote_branch(branch):
+            self.fetch_branch(branch)
+
+        if not self.has_remote_branch(branch):
+            raise RuntimeError(
+                f"branch '{branch}' does not exist locally or on origin "
+                f"(create it with `fgit branch create {branch}`)"
+            )
+
+        self._checkout_tracking(branch)
+
+    def _checkout_tracking(self, branch: str) -> None:
+        """Create a local ``branch`` from ``origin/branch`` and track it."""
         try:
-            self._git_run(["git", "checkout", branch], cwd=self.path, use_credentials=False)
-        except subprocess.CalledProcessError:
-            # Try to create tracking branch from origin.
-            self._git_run(
-                ["git", "checkout", "-b", branch, f"origin/{branch}"],
+            self._git_capture(
+                ["git", "checkout", "-b", branch, "--track", f"origin/{branch}"],
                 cwd=self.path,
                 use_credentials=False,
             )
+            return
+        except (RuntimeError, subprocess.CalledProcessError):
+            pass
+
+        # Tracking could not be set up (unusual remote layout). The branch
+        # itself is still worth having, so create it without an upstream.
+        self._git_capture(
+            ["git", "checkout", "-b", branch, f"origin/{branch}"],
+            cwd=self.path,
+            use_credentials=False,
+        )
 
     def list_branches(self) -> str:
         self._ensure_repo()
@@ -245,12 +346,7 @@ class Repo:
         self._git_run(["git", "fetch", "origin"], cwd=self.path)
 
         # 2. Checkout the target branch (create a tracking branch if needed).
-        try:
-            self._git_run(["git", "checkout", branch], cwd=self.path, use_credentials=False)
-        except subprocess.CalledProcessError:
-            self._git_run(
-                ["git", "checkout", "-b", branch, f"origin/{branch}"], cwd=self.path, use_credentials=False
-            )
+        self.checkout(branch)
 
         # 3. Pull latest code for the target branch.
         self._git_run(["git", "pull", "origin", branch], cwd=self.path)
@@ -302,6 +398,18 @@ class Repo:
             raise FileNotFoundError(f"Repo {self.name} is not cloned at {self.path}")
         if not self.is_git_repo():
             raise RuntimeError(f"{self.path} is not a Git repository")
+
+    def _ref_exists(self, ref: str) -> bool:
+        try:
+            self._git_run(
+                ["git", "show-ref", "--verify", "--quiet", ref],
+                cwd=self.path,
+                capture=True,
+                use_credentials=False,
+            )
+            return True
+        except subprocess.CalledProcessError:
+            return False
 
     def _is_dirty(self) -> bool:
         try:
