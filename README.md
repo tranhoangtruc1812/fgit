@@ -189,6 +189,33 @@ Thứ tự ưu tiên khi tìm root:
 4. `active_project` trong config
 5. `default_root` trong config (legacy)
 
+## Ví dụ `fgit checkout`
+
+```bash
+fgit checkout adding-meeting-features
+```
+
+Trên root và từng repo con, `fgit` thực hiện:
+1. Nếu branch đã có ở local → `git checkout <branch>`.
+2. Nếu chưa có → tự động `git fetch origin <branch>` (branch do người khác push
+   thường chưa có trong clone của bạn), rồi tạo tracking branch từ
+   `origin/<branch>`.
+3. Nếu branch không tồn tại cả ở local lẫn trên origin → repo đó được báo lỗi
+   kèm tên branch, các repo khác vẫn tiếp tục.
+
+Lệnh trả về exit code khác 0 nếu có ít nhất một repo không checkout được, và
+liệt kê tên các repo đó ở cuối. Ví dụ khi branch mới chỉ tồn tại ở một số repo:
+
+```
+✔ settings: checkout completed
+✖ ai-team-app: checkout failed: branch 'adding-meeting-features' does not exist
+  locally or on origin (create it with `fgit branch create adding-meeting-features`)
+✖ Branch 'adding-meeting-features' could not be checked out in 1 repo(s): ai-team-app
+```
+
+Repo nào có thay đổi chưa commit sẽ bị Git chặn checkout; hãy commit hoặc
+`git stash` trước rồi chạy lại.
+
 ## Ví dụ `fgit sync-from`
 
 ```bash

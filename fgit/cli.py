@@ -30,13 +30,25 @@ def _repos_from_manifest(manifest: Manifest, root_dir: str) -> List[Repo]:
     ]
 
 
+def _root_repo(manifest: Manifest, root_dir: str) -> Repo:
+    """Return a Repo handle for the root repository itself."""
+    return Repo(
+        name=os.path.basename(root_dir.rstrip(os.sep)) or root_dir,
+        url="",
+        path=root_dir,
+        default_branch=manifest.default_branch,
+    )
+
+
 def _run_parallel(
     repos: List[Repo],
     fn: Callable[[Repo], None],
     jobs: int = DEFAULT_JOBS,
     silent: bool = False,
     description: str = "operation",
-) -> None:
+) -> List[str]:
+    """Run ``fn`` over every repo and return the names of the ones that failed."""
+    failed: List[str] = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         future_to_repo = {executor.submit(fn, repo): repo for repo in repos}
         for future in as_completed(future_to_repo):
@@ -47,6 +59,8 @@ def _run_parallel(
                     log(f"{repo.name}: {description} completed", level="success")
             except Exception as exc:  # noqa: BLE001
                 log(f"{repo.name}: {description} failed: {exc}", level="error")
+                failed.append(repo.name)
+    return failed
 
 
 def cmd_clone(args: argparse.Namespace) -> int:
@@ -219,15 +233,31 @@ def cmd_checkout(args: argparse.Namespace) -> int:
     manifest = Manifest.load()
     repos = _repos_from_manifest(manifest, root_dir)
     dry_run = getattr(args, "dry_run", False)
+    failed: List[str] = []
+
     if dry_run:
         log(f"Dry-run: would checkout branch {branch} on root and all child repos...")
     else:
         log(f"Checking out branch {branch} on root and all child repos...")
+        root_repo = _root_repo(manifest, root_dir)
         try:
-            run_command(["git", "checkout", branch], cwd=root_dir)
-        except subprocess.CalledProcessError:
-            log(f"Could not checkout {branch} on root repo", level="warning")
-    _run_parallel(repos, lambda repo: repo.checkout(branch, dry_run=dry_run), jobs=args.jobs, description="checkout")
+            root_repo.checkout(branch)
+            log(f"{root_repo.name} (root): checkout completed", level="success")
+        except Exception as exc:  # noqa: BLE001
+            log(f"{root_repo.name} (root): checkout failed: {exc}", level="error")
+            failed.append(root_repo.name)
+
+    failed += _run_parallel(
+        repos, lambda repo: repo.checkout(branch, dry_run=dry_run), jobs=args.jobs, description="checkout"
+    )
+
+    if failed:
+        log(
+            f"Branch '{branch}' could not be checked out in {len(failed)} repo(s): "
+            f"{', '.join(failed)}",
+            level="error",
+        )
+        return 1
     return 0
 
 
@@ -252,8 +282,8 @@ def cmd_branch(args: argparse.Namespace) -> int:
             log(f"Dry-run: would create branch {args.name} on all repositories...")
         else:
             log(f"Creating branch {args.name} on all repositories...")
-        _run_parallel(repos, lambda repo: repo.create_branch(args.name, dry_run=dry_run), jobs=args.jobs, description="create branch")
-        return 0
+        failed = _run_parallel(repos, lambda repo: repo.create_branch(args.name, dry_run=dry_run), jobs=args.jobs, description="create branch")
+        return 1 if failed else 0
 
     if action == "delete":
         if not args.name:
@@ -549,7 +579,7 @@ EXPLANATIONS = {
     "pull": "Run `git pull --ff-only origin <current-branch>` in every child repository.",
     "push": "Run `git push origin <current-branch>` in every child repository.",
     "sync": "Run pull followed by push in every child repository.",
-    "checkout": "Checkout the given branch on root and every child repository. If the branch does not exist locally, create a tracking branch from origin/<branch>.",
+    "checkout": "Checkout the given branch on root and every child repository. If the branch is not known locally, fetch it from origin and create a tracking branch from origin/<branch>. Repositories where the branch exists nowhere are reported by name and the command exits non-zero.",
     "branch": "Manage branches across all child repositories: list, create (from origin/<default-branch>), or delete.",
     "exec": "Run an arbitrary shell command in every child repository and prefix the output with the repository name.",
     "sync-from": "For every child repository: (1) remember current branch, (2) fetch origin, (3) checkout the target branch and pull it, (4) checkout the original branch, (5) merge the target branch. If a merge conflict occurs, the merge is aborted.",

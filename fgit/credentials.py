@@ -63,6 +63,18 @@ def _read_netrc() -> str:
     return ""
 
 
+def find_credentials(machine: str = "gitlab.atomsolution.vn") -> Optional[Tuple[str, str]]:
+    """Return stored (username, password) for a machine, or None.
+
+    Unlike :func:`get_credentials` this never prompts, so it is safe to call
+    from background threads and from commands that may not need auth at all.
+    """
+    for entry_machine, login, password in _netrc_lines():
+        if entry_machine == machine:
+            return login, password
+    return None
+
+
 def get_credentials(machine: str = "gitlab.atomsolution.vn") -> Tuple[str, str]:
     """Return (username, password) for a machine.
 
